@@ -24,6 +24,11 @@ name = "az_train"
 path = "src/bin/az_train.rs"
 required-features = ["tch"]
 
+[[bin]]
+name = "az_eval"
+path = "src/bin/az_eval.rs"
+required-features = ["tch"]
+
 [features]
 # Enables the AlphaZero-style stack (policy/value net + PUCT MCTS).
 # Pulls tch (libtorch bindings) and auto-downloads libtorch (~2 GB)

@@ -40,6 +40,16 @@ impl Evaluator for AzNet {
     }
 }
 
+/// Auto-forward `Evaluator` through immutable references. Lets callers
+/// hold a single `AzNet` and hand `&net` to multiple short-lived
+/// `PuctPlayer<&AzNet>` instances (e.g. eval-vs-AB, one per game)
+/// without cloning the network.
+impl<T: Evaluator + ?Sized> Evaluator for &T {
+    fn evaluate(&self, board: &Board) -> (Vec<f32>, f32) {
+        (**self).evaluate(board)
+    }
+}
+
 /// Batched evaluator: scores N positions in one shot. The point is to
 /// amortize per-call overhead — GPU kernel launches, host↔device
 /// transfer — across many positions. Implementors are expected to
