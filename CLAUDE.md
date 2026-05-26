@@ -6,8 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Rust engine + CLI for **ADIX** (Echamier Games) — a 2-player abstract strategy
 game on a 9×9 board with cubic pieces whose top face is the active arme
-(pierre/feuille/ciseaux) under RPS combat rules. The repo exists to explore
-strategies and the game tree; there is no AI yet.
+(pierre/feuille/ciseaux) under RPS combat rules. The repo has the rules
+engine, perft, an alpha-beta agent (with positional eval + quiescence
++ classic search heuristics), a UCT MCTS agent, and a self-play harness
+to compare them.
 
 The canonical rules are in `regle-ADIX-officielles.pdf` at the repo root. If
 something in the engine looks wrong, **the PDF is the source of truth** — not
@@ -64,18 +66,26 @@ Seven modules, kept deliberately small and dependency-free (no external crates):
   hash. `legal_moves`, `apply`, `apply_legal`+`unmake`, `outcome` live here.
 - `notation` — parsing + ASCII rendering.
 - `zobrist` — splitmix64-derived keys for incremental Zobrist hashing.
-- `perft` — leaf-counter + `PerftTT` transposition table.
+- `perft` — leaf-counter (`perft` bulk-count, `perft_search` always-apply,
+  `perft_tt` with `PerftTT` transposition table) plus unique-position
+  counting (`unique_exact` via `HashSet`, `unique_hll` via the
+  `Hll14` HyperLogLog estimator for depths that don't fit in RAM).
 - `eval` — positional evaluation terms (material, threats on capitaine,
   capitaine confinement, RPS arme imbalance, mobility, offensive
   threats) + `full_eval` aggregator.
 - `agent` — `Player` trait + `RandomPlayer` + `AlphaBetaPlayer` (uses
   `eval::full_eval` by default, `material_eval` available via
-  `new_material_only` for A/B testing) + `MctsPlayer` (UCT) +
+  `new_material_only` for A/B testing; search heuristics:
+  MVV-LVA ordering, killer moves, persistent TT with Exact/Lower/Upper
+  bounds, quiescence) + `MctsPlayer` (UCT, iteration or time budget) +
   `play_game` harness.
 
-The library is in `src/lib.rs`; the REPL is `src/bin/adix.rs`, the perft
-benchmark is `src/bin/perft.rs`, and the self-play harness is
-`src/bin/selfplay.rs` — three separate binary targets.
+The library is in `src/lib.rs`; binary targets are `src/bin/adix.rs`
+(REPL), `src/bin/perft.rs` (perft benchmark), `src/bin/selfplay.rs`
+(agent vs agent). [examples/ab_bench.rs](examples/ab_bench.rs) is a
+standalone benchmark of `AlphaBetaPlayer` nodes/move, time/move, and
+TT hit rate at varying depths — run with `cargo run --release --example
+ab_bench`.
 
 ### Cube algebra — the only piece of math that matters
 
@@ -122,8 +132,8 @@ leaves the board untouched. Add these only if the user explicitly asks.
 
 ## Test layout
 
-- Unit tests live in `#[cfg(test)] mod tests` blocks inside each module
-  (currently `geom` and `piece`).
+- Unit tests in `#[cfg(test)] mod tests` blocks: `geom`, `piece`, `eval`,
+  `agent` (a handful of "agent plays a legal game" smoke tests).
 - Integration tests in `tests/`:
   - `initial.rs` — starting position structure.
   - `moves_basic.rs` — reproduces all three capture scenarios from the PDF's
@@ -131,6 +141,13 @@ leaves the board untouched. Add these only if the user explicitly asks.
     build positions via `Board::empty_for_test()` + `force_place` rather than
     massaging the initial position.
   - `rules.rs` — 3× removal, draw counter, win conditions.
+  - `perft.rs` — locks bulk-count perft 0–3 plus parity with
+    `perft_search` and `perft_tt`; locks `unique_exact` 0–4 and checks
+    `unique_hll` stays within 2% of exact; has a standalone HLL sanity
+    test on 100 k inserts.
+  - `zobrist.rs` — `apply_legal + unmake` round-trip must restore the
+    hash; incremental hash must always match `zobrist_from_scratch()`,
+    verified on every move at depth 1 and over a full depth-3 walk.
 
 `Board::empty_for_test`, `force_place`, and `set_side_to_move` are
 test-affordance APIs on the public surface; keep them if you need to write
@@ -285,14 +302,12 @@ biggest contributors are probably `threats_on_capitaine`
 (near-MATE signal when undefended) and `mobility_differential`
 (prevents the engine sitting on its hands).
 
-Two caveats worth tracking. (1) The eval is heavy: each call does
-~12 `moves_for_into` invocations (one per term × two sides), so
-search time grows much faster with depth than with the material-only
-eval — `ab:4` is now ~10× slower per move than `ab-mat:4`. (2)
-Preliminary `ab:4` vs `ab:2` was *not* a clean win for `ab:4` — early
-games leaned toward `ab:2`, suggesting the eval may have noisy
-positional terms (mobility flickers move-to-move) that amplify with
-depth. Worth investigating before tuning weights blindly.
+The eval is heavy: each call does ~12 `moves_for_into` invocations
+(one per term × two sides), so `ab:4` is roughly 10× slower per move
+than `ab-mat:4`. Acceptable through depth 5 with the search
+heuristics below; if it ever becomes the bottleneck, the obvious
+attacks are caching `moves_for_into` per (position, color) or
+precomputing piece-attack masks.
 
 All weights are in [src/eval.rs](src/eval.rs) and are not yet
 selfplay-tuned — first-pass guesses.
@@ -350,6 +365,10 @@ more search.
 
 ### Game dynamics (20-game samples, `--swap`)
 
+Pre-quiescence data, but the qualitative patterns still hold (with
+quiescence, peer-ish matches simply get longer still — see the
+post-quiescence section above).
+
 | matchup | plies | captures | 1st cap | by cap | by eq elim | winner eq / loser eq |
 |---|-:|-:|-:|-:|-:|-:|
 | random vs random | 74 | 0.8 | ply 39 | 90% | 10% | 5.2 / 5.0 |
@@ -364,7 +383,9 @@ Two non-obvious patterns:
    capitaine. But strong-vs-slightly-weaker and strong-vs-mirror are
    *longer than random play* (~58 vs 74 plies) because both sides are
    competent enough to defend; the games turn into tactical attrition
-   with 8-10 captures.
+   with 8-10 captures. Quiescence amplifies this further: `ab:5 vs ab:3`
+   averages **557 plies** because both sides correctly resolve each
+   tactical exchange and the game drifts into the deep endgame.
 2. **Capitaine is the dominant win condition** between engines
    (75-100% of wins), even when 10+ equipiers have already fallen.
    Equipier-elimination wins (25%) appear only in peer-ish play where
@@ -372,20 +393,18 @@ Two non-obvious patterns:
 
 ## Where this is going (big next steps)
 
-In rough priority order:
+The current plateau (`ab:5 vs ab:3` = 4-6 in 557-ply attrition games)
+is dominated by the eval, not the search. So the priority list is
+positional knowledge first, then search infrastructure to scale it.
 
-1. **Quiescence search.** Deeper AB doesn't reliably beat shallower AB
-   (e.g., `ab:5 vs ab:3` was 5-5 in a recent 10-game match). The eval
-   is *noisy* at the search horizon because positional terms like
-   `mobility_differential` and `offensive_threats` swing wildly when a
-   capture is one ply outside the search. Standard fix: at depth==0,
-   instead of returning eval, run a small capture-only search until
-   the position is "quiet" (no pending captures), *then* eval. This is
-   the single biggest expected improvement for tactical strength now.
-2. **Defended-pieces / SEE-lite eval term.** For each of my pieces
+1. **Defended-pieces / SEE-lite eval term.** For each of my pieces
    under threat by an opp piece P, check whether a same-arme defender
    can recapture P. Naive O(N²) — needs care to stay cheap at search
-   leaves.
+   leaves. Was the missing piece in the original eval discussion.
+2. **Stabler positional terms.** `mobility_differential` and
+   `offensive_threats` flicker move-to-move and are noisy at deeper
+   plies. Candidates: pawn-structure-style terms for cube orientation,
+   capitaine ring-of-defenders, capitaine-distance-to-board-edge.
 3. **Iterative deepening + time control.** Necessary for any practical
    "play one move within T seconds" interface. Free quality win
    because the TT-best from shallow searches seeds the deeper ones.
@@ -399,5 +418,6 @@ In rough priority order:
 
 Out-of-band ideas worth keeping on the radar: full bitboard move-gen
 (slides via shift+mask on `u128`), a shrunk `Piece` representation (Cube
-currently ~12 bytes; could be packed to one `u32`), an MCTS player as a
-sanity check on the alpha-beta one, and an opening-book miner.
+currently ~12 bytes; could be packed to one `u32`), principal-variation
+search (null-window after the first move at each PV node), and an
+opening-book miner.
