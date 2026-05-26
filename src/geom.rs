@@ -99,6 +99,10 @@ impl Dir8 {
     }
     pub const ORTHO: [Dir8; 4] = [Dir8::N, Dir8::S, Dir8::E, Dir8::W];
     pub const DIAG: [Dir8; 4] = [Dir8::NE, Dir8::NW, Dir8::SE, Dir8::SW];
+    pub const ALL: [Dir8; 8] = [
+        Dir8::N, Dir8::S, Dir8::E, Dir8::W,
+        Dir8::NE, Dir8::NW, Dir8::SE, Dir8::SW,
+    ];
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]

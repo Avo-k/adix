@@ -13,3 +13,4 @@ pub mod moves;
 pub mod notation;
 pub mod perft;
 pub mod piece;
+pub mod zobrist;

@@ -1,10 +1,11 @@
 use crate::geom::{Dir4, RotDir};
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[repr(u8)]
 pub enum Arme {
-    Pierre,
-    Feuille,
-    Ciseaux,
+    Pierre = 0,
+    Feuille = 1,
+    Ciseaux = 2,
 }
 
 impl Arme {
@@ -39,12 +40,24 @@ impl Face {
             Face::Abri => '^',
         }
     }
+
+    /// Pack into 2 bits for Zobrist hashing. 4 distinct values
+    /// (three armes + abri).
+    pub fn pack2(self) -> u8 {
+        match self {
+            Face::Arme(Arme::Pierre) => 0,
+            Face::Arme(Arme::Feuille) => 1,
+            Face::Arme(Arme::Ciseaux) => 2,
+            Face::Abri => 3,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[repr(u8)]
 pub enum Color {
-    Clair,
-    Fonce,
+    Clair = 0,
+    Fonce = 1,
 }
 
 impl Color {
@@ -57,9 +70,10 @@ impl Color {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[repr(u8)]
 pub enum Kind {
-    Capitaine,
-    Equipier,
+    Capitaine = 0,
+    Equipier = 1,
 }
 
 /// Six oriented faces of a cube. Axes: +y = N, +x = E, +z = up.
@@ -126,10 +140,11 @@ pub fn starting_equipier_cube() -> Cube {
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+#[repr(u8)]
 pub enum MoveKind {
-    Deplacement,
-    Bascule,
-    Pivot,
+    Deplacement = 0,
+    Bascule = 1,
+    Pivot = 2,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
