@@ -29,6 +29,7 @@ use crate::board::{Board, Outcome};
 use crate::moves::Move;
 use crate::piece::Color;
 
+use super::dirichlet::symmetric_dirichlet;
 use super::encoding::{ACTIONS, INPUT_SIZE, encode_state, move_to_index};
 use super::mcts::{
     BatchedEvaluator, Evaluator, PuctConfig, PuctNode, promote_child_to_root, puct_expand,
@@ -53,6 +54,14 @@ pub struct SelfPlayConfig {
     /// Hard cap on plies. ADIX's 30-ply draw counter terminates games
     /// anyway; this is a defensive safety net for early-training noise.
     pub max_plies: u32,
+    /// Symmetric Dirichlet α applied to the root's prior at the start
+    /// of every search. AZ paper rule of thumb: ~10 / branching_factor;
+    /// ADIX has ~50, so 0.2 is a sensible default.
+    pub dirichlet_alpha: f64,
+    /// Mixing weight for the Dirichlet noise: `p' = (1-ε)·p + ε·noise`.
+    /// AZ paper used 0.25. Set to 0 to disable noise (e.g. for
+    /// inference / evaluation runs).
+    pub dirichlet_eps: f32,
 }
 
 impl Default for SelfPlayConfig {
@@ -61,6 +70,8 @@ impl Default for SelfPlayConfig {
             puct: PuctConfig::default(),
             temperature_plies: 20,
             max_plies: 400,
+            dirichlet_alpha: 0.2,
+            dirichlet_eps: 0.25,
         }
     }
 }
@@ -162,6 +173,27 @@ fn search_one_move<E: Evaluator + ?Sized>(
     Some(OneSearch { policy_target, root_visits })
 }
 
+/// Mix symmetric Dirichlet(α) noise into the root's children's priors:
+/// `p' = (1 - eps) · p + eps · noise`. Called once per move per worker,
+/// just after the root is first expanded. Standard AZ exploration knob.
+fn inject_root_dirichlet(
+    arena: &mut [PuctNode],
+    alpha: f64,
+    eps: f32,
+    rng: &mut RandomPlayer,
+) {
+    let n = arena[0].children.len();
+    if n == 0 {
+        return;
+    }
+    let noise = symmetric_dirichlet(alpha, n, rng);
+    let children: Vec<usize> = arena[0].children.clone();
+    for (i, &cid) in children.iter().enumerate() {
+        let p = arena[cid].prior;
+        arena[cid].prior = (1.0 - eps) * p + eps * noise[i];
+    }
+}
+
 /// Sample proportionally to visits during the opening; argmax thereafter.
 fn pick_move_with_temperature(
     root_visits: &[(Move, u32)],
@@ -207,13 +239,26 @@ struct Worker {
     /// How many plies this game has played so far (for stats; ply count
     /// also lives on the board).
     ply: u32,
+    /// Root Dirichlet noise hasn't been mixed into the priors yet for
+    /// this move. We can't inject at construction time because the
+    /// root might still be unexpanded — defer until just after the
+    /// root's first expansion (or immediately if tree-reuse handed us
+    /// an already-expanded root).
+    noise_pending: bool,
 }
 
 impl Worker {
     fn new() -> Self {
         let board = Board::initial();
         let arena = vec![puct_root_node(&board)];
-        Self { board, arena, iter_count: 0, records: Vec::new(), ply: 0 }
+        Self {
+            board,
+            arena,
+            iter_count: 0,
+            records: Vec::new(),
+            ply: 0,
+            noise_pending: true,
+        }
     }
 
     fn reset(&mut self) {
@@ -222,11 +267,13 @@ impl Worker {
         self.iter_count = 0;
         self.records.clear();
         self.ply = 0;
+        self.noise_pending = true;
     }
 
     fn reset_arena(&mut self) {
         self.arena = vec![puct_root_node(&self.board)];
         self.iter_count = 0;
+        self.noise_pending = true;
     }
 }
 
@@ -379,6 +426,27 @@ pub fn play_batched<E: BatchedEvaluator + ?Sized>(
             // budget (shouldn't happen unless config changed mid-game).
             let carried = workers[i].arena[0].visits;
             workers[i].iter_count = carried.min(config.puct.iterations);
+            // New search root, so we owe a fresh round of root noise.
+            workers[i].noise_pending = true;
+        }
+
+        // After the eval step has expanded any just-reached leaves, the
+        // root may have become expanded (fresh-search case). Inject the
+        // Dirichlet noise once per move into expanded roots that still
+        // have noise pending. With tree reuse this fires immediately
+        // because the transplanted root is already expanded.
+        if config.dirichlet_eps > 0.0 {
+            for w in workers.iter_mut() {
+                if w.noise_pending && w.arena[0].expanded && !w.arena[0].children.is_empty() {
+                    inject_root_dirichlet(
+                        &mut w.arena,
+                        config.dirichlet_alpha,
+                        config.dirichlet_eps,
+                        rng,
+                    );
+                    w.noise_pending = false;
+                }
+            }
         }
 
         // 5. Game-over workers: emit samples, restart the board.
@@ -455,6 +523,8 @@ mod tests {
             puct: PuctConfig { iterations: 20, c_puct: 1.5, fpu_reduction: 0.2 },
             temperature_plies: 4,
             max_plies: 80,
+            dirichlet_alpha: 0.2,
+            dirichlet_eps: 0.25,
         };
         let mut rng = RandomPlayer::new(2024);
         let res = play_batched(&UniformEval, &cfg, 4, 3, &mut rng);
@@ -482,6 +552,10 @@ mod tests {
             puct: PuctConfig { iterations: 30, c_puct: 1.5, fpu_reduction: 0.2 },
             temperature_plies: 4,
             max_plies: 60, // keep the test fast
+            // play_one_game (sequential) doesn't inject root noise; the
+            // fields are still set so the struct is fully initialized.
+            dirichlet_alpha: 0.2,
+            dirichlet_eps: 0.0,
         };
         let mut rng = RandomPlayer::new(1337);
         let res = play_one_game(&UniformEval, &cfg, &mut rng);

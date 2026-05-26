@@ -9,6 +9,8 @@
 
 pub mod encoding;
 
+pub mod dirichlet;
+
 #[cfg(feature = "tch")]
 pub mod net;
 

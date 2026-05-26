@@ -197,6 +197,8 @@ fn main() {
             },
             temperature_plies: 20,
             max_plies: 400,
+            dirichlet_alpha: 0.2,
+            dirichlet_eps: 0.25,
         };
         let res = play_batched(
             &trainer.net,
