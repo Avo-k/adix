@@ -30,7 +30,9 @@ use crate::moves::Move;
 use crate::piece::Color;
 
 use super::dirichlet::symmetric_dirichlet;
-use super::encoding::{ACTIONS, INPUT_SIZE, encode_state, move_to_index};
+use super::encoding::{
+    ACTIONS, INPUT_SIZE, encode_state, mirror_policy, mirror_state, move_to_index,
+};
 use super::mcts::{
     BatchedEvaluator, Evaluator, PuctConfig, PuctNode, promote_child_to_root, puct_expand,
     puct_iterate, puct_backup, puct_root_node, puct_select, puct_terminal_value,
@@ -62,6 +64,11 @@ pub struct SelfPlayConfig {
     /// AZ paper used 0.25. Set to 0 to disable noise (e.g. for
     /// inference / evaluation runs).
     pub dirichlet_eps: f32,
+    /// Augment each emitted sample with its left/right mirror twin.
+    /// ADIX has horizontal reflection symmetry (and the starting
+    /// position is on the axis), so this doubles training data with
+    /// zero additional self-play compute.
+    pub augment_symmetry: bool,
 }
 
 impl Default for SelfPlayConfig {
@@ -72,6 +79,7 @@ impl Default for SelfPlayConfig {
             max_plies: 400,
             dirichlet_alpha: 0.2,
             dirichlet_eps: 0.25,
+            augment_symmetry: true,
         }
     }
 }
@@ -466,6 +474,21 @@ pub fn play_batched<E: BatchedEvaluator + ?Sized>(
                     Some(w) => if w == sample_stm { 1.0 } else { -1.0 },
                     None => 0.0,
                 };
+                if config.augment_symmetry {
+                    // ADIX is symmetric under left/right reflection, so
+                    // emit a mirror twin of every sample. Value is
+                    // unchanged (game outcome is symmetry-invariant);
+                    // state and policy are mirrored.
+                    let mut mirror_st = state.clone();
+                    mirror_state(&mut mirror_st);
+                    let mut mirror_pt = vec![0.0_f32; ACTIONS];
+                    mirror_policy(&policy_target, &mut mirror_pt);
+                    samples_out.push(Sample {
+                        state: mirror_st,
+                        policy_target: mirror_pt,
+                        value_target,
+                    });
+                }
                 samples_out.push(Sample { state, policy_target, value_target });
             }
             outcomes.push(outcome);
@@ -525,6 +548,7 @@ mod tests {
             max_plies: 80,
             dirichlet_alpha: 0.2,
             dirichlet_eps: 0.25,
+            augment_symmetry: true,
         };
         let mut rng = RandomPlayer::new(2024);
         let res = play_batched(&UniformEval, &cfg, 4, 3, &mut rng);
@@ -556,6 +580,9 @@ mod tests {
             // fields are still set so the struct is fully initialized.
             dirichlet_alpha: 0.2,
             dirichlet_eps: 0.0,
+            // play_one_game also ignores augment_symmetry — sequential
+            // path is only used by tests.
+            augment_symmetry: false,
         };
         let mut rng = RandomPlayer::new(1337);
         let res = play_one_game(&UniformEval, &cfg, &mut rng);

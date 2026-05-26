@@ -295,6 +295,117 @@ pub fn index_to_move(idx: usize) -> Option<Move> {
     }
 }
 
+// --- left/right mirror (data augmentation) -------------------------------
+
+/// In-place horizontal (file → 8 − file) mirror of an encoded state
+/// tensor. Used to augment self-play data: ADIX's rules are symmetric
+/// under left/right reflection (the starting position is itself
+/// mirror-symmetric), so any `(state, π, z)` sample has a mirror
+/// twin with the same value target and a permuted policy.
+///
+/// Operates on the 37×9×9 buffer layout from [`encode_state`]:
+/// 1. Each plane is flipped along the file axis.
+/// 2. The east-face and west-face plane groups (4 channels each) are
+///    swapped, because reflecting the board also swaps each cube's
+///    east and west faces.
+pub fn mirror_state(state: &mut [f32]) {
+    assert_eq!(state.len(), INPUT_SIZE);
+    // Step 1: flip file axis on every plane.
+    for plane in 0..INPUT_PLANES {
+        let base = plane * BOARD_CELLS;
+        for rank in 0..BOARD_H {
+            let row = base + rank * BOARD_W;
+            for file in 0..BOARD_W / 2 {
+                state.swap(row + file, row + (BOARD_W - 1 - file));
+            }
+        }
+    }
+    // Step 2: swap east-face and west-face plane groups.
+    for arme in 0..4 {
+        let pe = (P_EAST + arme) * BOARD_CELLS;
+        let pw = (P_WEST + arme) * BOARD_CELLS;
+        for i in 0..BOARD_CELLS {
+            state.swap(pe + i, pw + i);
+        }
+    }
+}
+
+#[inline]
+fn mirror_dir8_idx(i: usize) -> usize {
+    // N→N, S→S, E↔W, NE↔NW, SE↔SW.
+    match i {
+        0 | 1 => i,
+        2 => 3,
+        3 => 2,
+        4 => 5,
+        5 => 4,
+        6 => 7,
+        7 => 6,
+        _ => unreachable!(),
+    }
+}
+
+#[inline]
+fn mirror_dir4_idx(i: usize) -> usize {
+    // N→N, S→S, E↔W.
+    match i {
+        0 | 1 => i,
+        2 => 3,
+        3 => 2,
+        _ => unreachable!(),
+    }
+}
+
+#[inline]
+fn mirror_rot_idx(i: usize) -> usize {
+    // Left↔Right: a CW rotation in the mirrored world is CCW in the
+    // original frame.
+    1 - i
+}
+
+/// Action index after horizontal mirror: the from-square's file flips
+/// (file → 8-file), the direction-bearing planes are remapped, distance
+/// is unchanged.
+pub fn mirror_action_index(idx: usize) -> usize {
+    debug_assert!(idx < ACTIONS);
+    let plane = idx / BOARD_CELLS;
+    let cell = idx % BOARD_CELLS;
+    let file = cell % BOARD_W;
+    let rank = cell / BOARD_W;
+    let new_file = BOARD_W - 1 - file;
+    let new_cell = rank * BOARD_W + new_file;
+    let new_plane = if plane < A_BAS_BASE {
+        // Deplacement: plane = Dir8 * 8 + (dist - 1)
+        let dir = plane / MAX_SLIDE;
+        let dist = plane % MAX_SLIDE;
+        mirror_dir8_idx(dir) * MAX_SLIDE + dist
+    } else if plane < A_PIV_BASE {
+        A_BAS_BASE + mirror_dir4_idx(plane - A_BAS_BASE)
+    } else {
+        A_PIV_BASE + mirror_rot_idx(plane - A_PIV_BASE)
+    };
+    new_plane * BOARD_CELLS + new_cell
+}
+
+/// Apply [`mirror_action_index`] permutation to a policy vector.
+/// `out` is filled with the mirrored copy; `policy` is read but
+/// unchanged. Use [`mirror_policy_in_place`] if you don't need both.
+pub fn mirror_policy(policy: &[f32], out: &mut [f32]) {
+    assert_eq!(policy.len(), ACTIONS);
+    assert_eq!(out.len(), ACTIONS);
+    out.fill(0.0);
+    for idx in 0..ACTIONS {
+        out[mirror_action_index(idx)] = policy[idx];
+    }
+}
+
+/// In-place version of [`mirror_policy`]. Allocates a `Vec` internally.
+pub fn mirror_policy_in_place(policy: &mut [f32]) {
+    let mut tmp = vec![0.0_f32; ACTIONS];
+    mirror_policy(policy, &mut tmp);
+    policy.copy_from_slice(&tmp);
+}
+
 /// Fill `mask` (length [`ACTIONS`]) with 1.0 at legal-move indices,
 /// 0.0 elsewhere. Cheap: O(legal_moves).
 pub fn fill_legal_mask(board: &Board, mask: &mut [f32]) {
@@ -414,6 +525,70 @@ mod tests {
         // = plane 24, cell 0 → idx 24*81 = 1944.
         let idx = 24 * 81;
         assert!(index_to_move(idx).is_none());
+    }
+
+    #[test]
+    fn mirror_action_index_is_an_involution() {
+        for idx in 0..ACTIONS {
+            let m = mirror_action_index(idx);
+            assert!(m < ACTIONS);
+            assert_eq!(
+                mirror_action_index(m),
+                idx,
+                "mirror should be self-inverse at index {idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn mirror_state_initial_position_is_idempotent() {
+        // ADIX's starting position is itself mirror-symmetric (the file
+        // axis is the axis of symmetry: capitaine on e1/e9, equipiers
+        // arranged symmetrically). So mirroring it should leave the
+        // encoded tensor unchanged.
+        let board = Board::initial();
+        let mut v = encode_state_vec(&board);
+        let original = v.clone();
+        mirror_state(&mut v);
+        assert_eq!(v, original, "starting position should be its own mirror");
+    }
+
+    #[test]
+    fn mirror_state_twice_recovers_original() {
+        let mut board = Board::initial();
+        // Apply a few moves to get a non-symmetric position.
+        for _ in 0..3 {
+            let mv = board.legal_moves()[0];
+            board.apply_legal(mv);
+        }
+        let mut v = encode_state_vec(&board);
+        let original = v.clone();
+        mirror_state(&mut v);
+        mirror_state(&mut v);
+        assert_eq!(v, original);
+    }
+
+    #[test]
+    fn mirror_policy_preserves_mass_and_is_involution() {
+        // Build an arbitrary normalized policy.
+        let mut p = vec![0.0_f32; ACTIONS];
+        for i in 0..ACTIONS {
+            p[i] = (i % 17) as f32 / 17.0;
+        }
+        let total: f32 = p.iter().sum();
+        // Normalize to known mass.
+        for v in p.iter_mut() {
+            *v /= total;
+        }
+        let mut once = vec![0.0_f32; ACTIONS];
+        mirror_policy(&p, &mut once);
+        let m1: f32 = once.iter().sum();
+        assert!((m1 - 1.0).abs() < 1e-3);
+        let mut twice = vec![0.0_f32; ACTIONS];
+        mirror_policy(&once, &mut twice);
+        for i in 0..ACTIONS {
+            assert!((twice[i] - p[i]).abs() < 1e-6);
+        }
     }
 
     #[test]

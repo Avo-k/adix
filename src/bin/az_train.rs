@@ -199,6 +199,7 @@ fn main() {
             max_plies: 400,
             dirichlet_alpha: 0.2,
             dirichlet_eps: 0.25,
+            augment_symmetry: true,
         };
         let res = play_batched(
             &trainer.net,
