@@ -1,110 +1,115 @@
 # ADIX
 
-A Rust engine, CLI, and self-play harness for **ADIX**, a 2-player abstract
-strategy game on a 9×9 board with cubic pieces whose top face is the active
-arme (*pierre / feuille / ciseaux*) under rock-paper-scissors combat rules.
+Un moteur Rust, une CLI et un banc d'auto-jeu pour **ADIX**, un jeu de
+stratégie abstraite à deux joueurs sur un échamier 9×9, où chaque pièce
+cubique présente sur sa face supérieure l'arme active (*pierre*, *feuille* ou
+*ciseaux*) selon les règles de combat pierre-feuille-ciseaux.
 
-ADIX is designed and published by **Échamier Games**. The game, its rules, and
-its name are their work — please buy a copy and support them:
+ADIX est conçu et édité par **Échamier Games**. Le jeu, ses règles et son nom
+sont leur création — achetez le jeu pour les soutenir :
 <https://www.echamiergames.fr/>
 
-This repository is an independent, unaffiliated implementation built to
-explore the game tree and experiment with playing agents. The canonical rules
-live in [regle-ADIX-officielles.pdf](regle-ADIX-officielles.pdf) at the repo
-root; the engine follows them but is not a substitute for the rulebook.
+Ce dépôt est une implémentation logicielle indépendante et non affiliée,
+écrite pour explorer l'arbre de jeu et expérimenter avec des agents de jeu.
+Les règles officielles se trouvent dans
+[regle-ADIX-officielles.pdf](regle-ADIX-officielles.pdf) à la racine du dépôt ;
+le moteur s'y conforme mais ne remplace pas le livret de règles.
 
-## Build & run
+## Compilation & exécution
 
-Requires a stable Rust toolchain (edition 2024). No external crates.
+Nécessite une chaîne d'outils Rust stable (édition 2024). Aucune dépendance
+externe.
 
 ```sh
 cargo build --release
 cargo test
 ```
 
-Three binaries:
+Trois binaires :
 
 ```sh
-cargo run --release --bin adix                            # interactive REPL
+cargo run --release --bin adix                            # REPL interactif
 cargo run --release --bin perft     -- 5 [--search|--tt[=mb]]
-cargo run --release --bin selfplay  -- <white> <black> [N] [--swap]
+cargo run --release --bin selfplay  -- <blanc> <noir> [N] [--swap]
 ```
 
 ### REPL
 
-Commands: `help`, `board`, `moves`, `moves <sq>`, `<move>`, `undo`, `quit`.
+Commandes : `help`, `board`, `moves`, `moves <case>`, `<coup>`, `undo`, `quit`.
 
-Move notation:
-- `e1-e2` — *déplacement* (slide)
-- `e1>n`  — *bascule* (tumble: `n`/`s`/`e`/`w`)
-- `e1@l`  — *pivot* (`l` or `r`)
+Notation des coups :
+- `e1-e2` — *déplacement* (glissement)
+- `e1>n`  — *bascule* (`n`/`s`/`e`/`w`)
+- `e1@l`  — *pivot* (`l` ou `r`)
 
-Board glyphs: `O` pierre, `+` feuille, `X` ciseaux, `^` abri; `w`/`b` color
-prefix; `*` marks a *capitaine*.
+Glyphes du plateau : `O` pierre, `+` feuille, `X` ciseaux, `^` abri ;
+préfixe `w`/`b` pour la couleur ; `*` marque un *capitaine*.
 
-### Self-play
+### Auto-jeu
 
-Agent specs accepted by `selfplay`:
+Agents acceptés par `selfplay` :
 
-- `random` — uniform random legal move
-- `ab:<depth>` — fixed-depth alpha-beta (material-only eval)
-- `mcts:<iterations>` — UCT MCTS with random rollouts
+- `random` — coup légal uniformément aléatoire
+- `ab:<profondeur>` — alpha-bêta à profondeur fixe (évaluation matérielle seule)
+- `mcts:<itérations>` — MCTS UCT avec rollouts aléatoires
 
-`--swap` alternates colors between games so results aren't biased by who moves
-first.
+L'option `--swap` alterne les couleurs entre les parties pour éviter que le
+résultat soit dominé par le trait.
 
 ### Perft
 
-Locked node counts from the initial position, release build, branching factor
-~51:
+Nombres de nœuds verrouillés depuis la position initiale, en build release ;
+le facteur de branchement tourne autour de 51 :
 
-| depth | nodes        | bulk  | search | TT (64 MB) |
-|------:|-------------:|------:|-------:|-----------:|
-| 3     | 82 110       | <1 ms | 2 ms   | <1 ms      |
-| 4     | 3 811 526    | 8 ms  | 95 ms  | 8 ms       |
-| 5     | 194 027 791  | 0.42 s| 4.8 s  | 0.26 s     |
-| 6     | 9 830 027 851| 22 s  | —      | 8.6 s (256 MB) |
+| profondeur | nœuds        | bulk  | search | TT (64 Mo) |
+|-----------:|-------------:|------:|-------:|-----------:|
+| 3          | 82 110       | <1 ms | 2 ms   | <1 ms      |
+| 4          | 3 811 526    | 8 ms  | 95 ms  | 8 ms       |
+| 5          | 194 027 791  | 0,42 s| 4,8 s  | 0,26 s     |
+| 6          | 9 830 027 851| 22 s  | —      | 8,6 s (256 Mo) |
 
-Depths 0–3 are pinned in [tests/perft.rs](tests/perft.rs); depths 4–6 run on
-demand via the `perft` binary.
+Les profondeurs 0 à 3 sont figées dans [tests/perft.rs](tests/perft.rs) ; les
+profondeurs 4 à 6 se lancent à la demande via le binaire `perft`.
 
-## Layout
+## Structure
 
-- [src/lib.rs](src/lib.rs) — library entry point
-- [src/geom.rs](src/geom.rs) — board coordinates
-- [src/piece.rs](src/piece.rs) — cube algebra, pieces, RPS combat
-- [src/board.rs](src/board.rs) — board state, move generation, apply/unmake
-- [src/zobrist.rs](src/zobrist.rs) — incremental Zobrist hashing
-- [src/perft.rs](src/perft.rs) — perft + transposition table
-- [src/agent.rs](src/agent.rs) — `Player` trait, random / alpha-beta / MCTS
+- [src/lib.rs](src/lib.rs) — point d'entrée de la bibliothèque
+- [src/geom.rs](src/geom.rs) — coordonnées du plateau
+- [src/piece.rs](src/piece.rs) — algèbre du cube, pièces, combat PFC
+- [src/board.rs](src/board.rs) — état du plateau, génération des coups, apply/unmake
+- [src/zobrist.rs](src/zobrist.rs) — hachage Zobrist incrémental
+- [src/perft.rs](src/perft.rs) — perft + table de transposition
+- [src/agent.rs](src/agent.rs) — trait `Player`, joueurs random / alpha-bêta / MCTS
 - [src/bin/adix.rs](src/bin/adix.rs) — REPL
-- [src/bin/perft.rs](src/bin/perft.rs) — perft benchmark
-- [src/bin/selfplay.rs](src/bin/selfplay.rs) — agent-vs-agent harness
+- [src/bin/perft.rs](src/bin/perft.rs) — benchmark perft
+- [src/bin/selfplay.rs](src/bin/selfplay.rs) — banc agent contre agent
 
-Architectural notes, the cube algebra, the rules subset that's encoded, and
-the perft baselines are documented in [CLAUDE.md](CLAUDE.md).
+Les notes d'architecture, l'algèbre du cube, le sous-ensemble de règles
+encodé et les références perft sont documentés dans [CLAUDE.md](CLAUDE.md).
 
-## Status
+## État d'avancement
 
-- Full legal move generation, validated by perft to depth 6.
-- Incremental Zobrist hashing; perft TT working.
-- Three baseline agents (random, alpha-beta, MCTS). The material-only eval is
-  the next thing to improve — see the roadmap in [CLAUDE.md](CLAUDE.md).
-- Out of scope: tournament protocol (*j'ajuste*, ADIX announcement, touch-move,
-  clock, §11 sanctions).
+- Génération de tous les coups légaux, validée par perft jusqu'à la profondeur 6.
+- Hachage Zobrist incrémental ; table de transposition perft fonctionnelle.
+- Trois agents de base (random, alpha-bêta, MCTS). L'évaluation purement
+  matérielle est le prochain chantier — voir la feuille de route dans
+  [CLAUDE.md](CLAUDE.md).
+- Hors périmètre : le protocole de tournoi (*j'ajuste*, annonce ADIX,
+  pièce touchée pièce jouée, pendule, sanctions §11).
 
-## Vocabulary
+## Convention de vocabulaire
 
-The code uses French game-domain terms without accents (`capitaine`,
+Le code emploie les termes français du jeu sans accents (`capitaine`,
 `equipier`, `pierre`, `feuille`, `ciseaux`, `abri`, `bascule`, `pivot`,
-`echamier`, `deplacement`, `clair` / `fonce`) to stay faithful to the
-rulebook while keeping identifiers ASCII.
+`echamier`, `deplacement`, `clair` / `fonce`) pour rester fidèle au livret
+tout en gardant des identifiants ASCII.
 
-## Credit & licence
+## Crédits & licence
 
-ADIX — the game itself, its rules, its name, and its visual identity — is the
-intellectual property of **Échamier Games** (<https://www.echamiergames.fr/>).
+ADIX — le jeu lui-même, ses règles, son nom et son identité visuelle — est la
+propriété intellectuelle d'**Échamier Games**
+(<https://www.echamiergames.fr/>).
 
-This repository contains only an independent software implementation written
-to study the game. It is not endorsed by or affiliated with Échamier Games. If
-you enjoy ADIX, buy the physical game from them.
+Ce dépôt ne contient qu'une implémentation logicielle indépendante, écrite
+pour étudier le jeu. Il n'est ni endossé par ni affilié à Échamier Games. Si
+ADIX vous plaît, achetez le jeu physique chez eux.
