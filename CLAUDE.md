@@ -8,8 +8,10 @@ A Rust engine + CLI for **ADIX** (Echamier Games) — a 2-player abstract strate
 game on a 9×9 board with cubic pieces whose top face is the active arme
 (pierre/feuille/ciseaux) under RPS combat rules. The repo has the rules
 engine, perft, an alpha-beta agent (with positional eval + quiescence
-+ classic search heuristics), a UCT MCTS agent, and a self-play harness
-to compare them.
++ classic search heuristics), a UCT MCTS agent, a self-play harness
+to compare them, and an **AlphaZero-style training stack** (PUCT-MCTS
+guided by a policy/value net, batched self-play, replay buffer,
+checkpoints) gated behind the `tch` cargo feature.
 
 The canonical rules are in `regle-ADIX-officielles.pdf` at the repo root. If
 something in the engine looks wrong, **the PDF is the source of truth** — not
@@ -26,6 +28,14 @@ cargo run                # launch the REPL on the initial position
 cargo run --release --bin perft     -- 5 [--search|--tt[=mb]]
 cargo run --release --bin selfplay  -- <white> <black> [N] [--swap]
 cargo build --release    # optimized build, useful before tree-search work
+
+# AlphaZero stack (feature-gated). The first --features tch build
+# auto-downloads libtorch (~2 GB CPU, ~5 GB CUDA). For GPU set
+# TORCH_CUDA_VERSION=cu128 (or matching toolkit) before the first build.
+cargo run --release --features tch --bin az_train -- \
+    [iter=3] [games/iter=8] [workers=16] [puct=100] [batch=64] [steps=20]
+cargo run --release --features tch --bin az_eval  -- \
+    <ckpt.ot> [games=20] [puct_iters=400] [ab_depth=3]
 ```
 
 The REPL accepts: `help`, `board`, `moves`, `moves <sq>`, `<move>`, `undo`,
@@ -54,7 +64,12 @@ them. Adding accents (e.g. `équipier`) will break identifiers.
 
 ## Architecture
 
-Seven modules, kept deliberately small and dependency-free (no external crates):
+The classical engine (everything that's compiled by default) is
+**dependency-free** — no external crates. The AlphaZero stack under
+`src/az/` adds an optional `tch` (libtorch) dependency, gated behind
+the `tch` cargo feature so default builds stay lean.
+
+Classical-engine modules:
 
 - `geom` — `Pos { file, rank }` with file 0–8 = a–i, rank 0–8 = 1–9. `Pos::is_dark`
   uses `(file + rank) % 2 == 0`, so a1 (the dark corner) is dark.
@@ -86,6 +101,47 @@ The library is in `src/lib.rs`; binary targets are `src/bin/adix.rs`
 standalone benchmark of `AlphaBetaPlayer` nodes/move, time/move, and
 TT hit rate at varying depths — run with `cargo run --release --example
 ab_bench`.
+
+AlphaZero modules (under `src/az/`, gated by `tch` feature unless noted):
+
+- `encoding` — **always compiled, pure Rust**. State: 37×9×9 f32
+  tensor (presence × {self, opp} × {cap, eq}, 6 face one-hots,
+  streak/last_kind one-hots, broadcast STM + plies). Action: 70×9×9
+  = 5670 (Dir8×8 dist deplacement + Dir4 bascule + RotDir pivot).
+  `move_to_index` / `index_to_move` / `fill_legal_mask` /
+  `mirror_state` / `mirror_policy` for left/right augmentation.
+- `dirichlet` — **always compiled, pure Rust**. Marsaglia-Tsang
+  Gamma + boost for α<1, symmetric Dirichlet sampler. RNG via
+  `RandomPlayer` (splitmix64).
+- `net` — `AzNet`: residual tower (6 blocks × 64 channels) + policy
+  and value heads. `forward_board` (batch=1) and `forward_boards`
+  (batched). Illegal-move mask injected as log-space bias (-1e9).
+- `mcts` — PUCT (with FPU and tree reuse). Split into `puct_select` /
+  `puct_expand` / `puct_backup` / `puct_terminal_value` primitives so
+  the batched self-play loop can interleave evals.
+  `promote_child_to_root` re-roots the arena on the chosen child
+  between moves, carrying visits + Q forward. `PuctPlayer` impls
+  `Player` for the harness; `Evaluator` / `BatchedEvaluator` traits +
+  blanket impl for `&T` so checkpoints can be shared across players.
+- `selfplay` — `play_one_game` (sequential, tests only) and
+  `play_batched` (N parallel workers, GPU-batched inference). Visit-
+  count policy target, temperature-then-argmax move selection,
+  Dirichlet noise injected at the root once per move via a deferred
+  `noise_pending` flag. Optional left/right mirror augmentation
+  doubles emitted samples per game at zero self-play cost.
+- `replay` — `ReplayBuffer`, FIFO sliding window over recent samples
+  with uniform-random minibatch draw.
+- `train` — `Trainer::train_step(batch)`. Loss = mean over batch of
+  `-Σ π_target · log_softmax(p_logits) + (v - z)²`. No mask on
+  illegal logits during training (targets already have 0 mass there).
+
+AZ binary targets: `src/bin/az_train.rs` (orchestrates the batched
+self-play → replay buffer → gradient step → checkpoint loop) and
+`src/bin/az_eval.rs` (loads a checkpoint and plays a head-to-head
+series vs `AlphaBetaPlayer`). Both auto-detect CUDA via
+`Device::cuda_if_available()` and `dlopen` `libtorch_cuda.so` at
+startup so the linker's default `--as-needed` doesn't drop it.
+Override with `ADIX_AZ_FORCE_CPU=1`.
 
 ### Cube algebra — the only piece of math that matters
 
@@ -393,31 +449,47 @@ Two non-obvious patterns:
 
 ## Where this is going (big next steps)
 
-The current plateau (`ab:5 vs ab:3` = 4-6 in 557-ply attrition games)
-is dominated by the eval, not the search. So the priority list is
-positional knowledge first, then search infrastructure to scale it.
+Two open fronts: pushing the AZ training to actually beat the
+classical engine, and incremental classical improvements that close
+the gap with cheaper compute.
 
-1. **Defended-pieces / SEE-lite eval term.** For each of my pieces
-   under threat by an opp piece P, check whether a same-arme defender
-   can recapture P. Naive O(N²) — needs care to stay cheap at search
-   leaves. Was the missing piece in the original eval discussion.
-2. **Stabler positional terms.** `mobility_differential` and
-   `offensive_threats` flicker move-to-move and are noisy at deeper
-   plies. Candidates: pawn-structure-style terms for cube orientation,
-   capitaine ring-of-defenders, capitaine-distance-to-board-edge.
-3. **Iterative deepening + time control.** Necessary for any practical
-   "play one move within T seconds" interface. Free quality win
-   because the TT-best from shallow searches seeds the deeper ones.
-4. **Selfplay-tune the eval weights.** Current constants in
-   [src/eval.rs](src/eval.rs) are guesses. A coordinate-descent
-   tournament against MCTS could refine each weight independently.
-5. **Symmetry exploitation.** The board has left/right reflection
-   symmetry that's preserved by the initial position. At the root and
-   in opening exploration, dedupe mirror-equivalent positions to halve
-   work.
+**On the AZ side**, the pipeline is in place; what remains is
+training and tuning:
 
-Out-of-band ideas worth keeping on the radar: full bitboard move-gen
-(slides via shift+mask on `u128`), a shrunk `Piece` representation (Cube
-currently ~12 bytes; could be packed to one `u32`), principal-variation
-search (null-window after the first move at each PV node), and an
-opening-book miner.
+1. **Real-scale training run.** The smoke tests confirm gradient
+   signal but nothing more. A meaningful run is something like
+   50+ iterations × 32 games × 200 PUCT iters with the replay
+   buffer at ~50k. Measure `az_eval` win rate vs `ab:3` every few
+   iters — that's the metric, not the loss.
+2. **Bigger network once 6×64 plateaus.** If win rate stalls below
+   ab:3 even with a healthy replay buffer, scale to 10×128 or
+   12×128. Profile inference batch size on the 4090 to keep
+   batched self-play GPU-bound.
+3. **PUCT log-scaling cpuct** (Lc0 variant):
+   `c_puct = c_init + log((N + c_base + 1) / c_base)`. Adapts
+   exploration to depth without manual tuning. 10 lines on top of
+   our current `c_puct` scalar.
+4. **Position cache** for transpositions during self-play. Hash on
+   Zobrist; cache `(policy, value)` for repeated positions inside
+   one tree. Cheap when policy is peaked.
+5. **Pondering / async self-play.** Run net inference and game
+   logic on separate threads with a request queue, so the GPU is
+   never idle waiting for CPU-side legal move generation. Bigger
+   change but the obvious next step once we want >1k samples/s.
+
+**On the classical side** (would help even without AZ winning):
+
+- **Defended-pieces / SEE-lite eval term.** For each of my pieces
+  under threat by an opp piece P, check whether a same-arme
+  defender can recapture P. Was the missing piece in the original
+  eval discussion.
+- **Stabler positional terms.** `mobility_differential` and
+  `offensive_threats` flicker move-to-move. Candidates: cube
+  orientation terms, capitaine ring-of-defenders, capitaine-distance-
+  to-board-edge.
+- **Iterative deepening + time control** on AB. Free quality win
+  via TT-best seeding from shallow searches.
+
+Out-of-band: full bitboard move-gen (slides via shift+mask on
+`u128`), shrunk `Piece` packed to `u32`, principal-variation
+search.
