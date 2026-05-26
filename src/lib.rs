@@ -8,6 +8,7 @@
 //! - [`notation`]: parse/format moves, render the board
 
 pub mod agent;
+pub mod az;
 pub mod board;
 pub mod eval;
 pub mod geom;

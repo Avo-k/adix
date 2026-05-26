@@ -19,6 +19,21 @@ path = "src/bin/perft.rs"
 name = "selfplay"
 path = "src/bin/selfplay.rs"
 
+[[bin]]
+name = "az_train"
+path = "src/bin/az_train.rs"
+required-features = ["tch"]
+
+[features]
+# Enables the AlphaZero-style stack (policy/value net + PUCT MCTS).
+# Pulls tch (libtorch bindings) and auto-downloads libtorch (~2 GB)
+# on first build via tch's download-libtorch sub-feature, so no env
+# var setup is required. Default builds remain dependency-free.
+tch = ["dep:tch", "tch/download-libtorch"]
+
+[dependencies]
+tch = { version = "0.20", optional = true, default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

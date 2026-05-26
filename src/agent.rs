@@ -38,7 +38,7 @@ impl RandomPlayer {
         // Splitmix is biased near 0 for trivial seeds, so step it once.
         Self { state: splitmix64(seed.wrapping_add(0xA5A5_5A5A_DEAD_BEEF)) }
     }
-    fn next_u64(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.state = splitmix64(self.state);
         self.state
     }
