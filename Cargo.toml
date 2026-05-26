@@ -15,6 +15,10 @@ path = "src/bin/adix.rs"
 name = "perft"
 path = "src/bin/perft.rs"
 
+[[bin]]
+name = "selfplay"
+path = "src/bin/selfplay.rs"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

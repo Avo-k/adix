@@ -7,7 +7,9 @@
 //! - [`board`]: game state, legal moves, apply, terminal detection
 //! - [`notation`]: parse/format moves, render the board
 
+pub mod agent;
 pub mod board;
+pub mod eval;
 pub mod geom;
 pub mod moves;
 pub mod notation;
