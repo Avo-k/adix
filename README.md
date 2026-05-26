@@ -61,15 +61,28 @@ résultat soit dominé par le trait.
 Nombres de nœuds verrouillés depuis la position initiale, en build release ;
 le facteur de branchement tourne autour de 51 :
 
-| profondeur | nœuds        | bulk  | search | TT (64 Mo) |
-|-----------:|-------------:|------:|-------:|-----------:|
-| 3          | 82 110       | <1 ms | 2 ms   | <1 ms      |
-| 4          | 3 811 526    | 8 ms  | 95 ms  | 8 ms       |
-| 5          | 194 027 791  | 0,42 s| 4,8 s  | 0,26 s     |
-| 6          | 9 830 027 851| 22 s  | —      | 8,6 s (256 Mo) |
+| profondeur | nœuds            | bulk               | search           | TT (64 Mo)                     | positions uniques     |
+|-----------:|-----------------:|-------------------:|-----------------:|-------------------------------:|----------------------:|
+| 1          | 42               | <1 ms              | <1 ms            | <1 ms                          | 41                    |
+| 2          | 1 764            | <1 ms              | <1 ms            | <1 ms                          | 1 681                 |
+| 3          | 82 110           | <1 ms · 430 Mn/s   | 2 ms · 41 Mn/s   | <1 ms · 445 Mn/s               | 50 223                |
+| 4          | 3 811 526        | 8 ms · 450 Mn/s    | 95 ms · 40 Mn/s  | 8 ms · 450 Mn/s                | 1 459 274             |
+| 5          | 194 027 791      | 0,42 s · 465 Mn/s  | 4,8 s · 40 Mn/s  | 0,26 s · 735 Mn/s              | 44 341 309            |
+| 6          | 9 830 027 851    | 22 s · 450 Mn/s    | —                | 8,6 s · 1100 Mn/s (256 Mo)     | ~1 210 025 921 (HLL)  |
+| 7          | 538 293 069 289  | —                  | —                | 4 min 51 s · 1850 Mn/s (4 Go)  | —                     |
 
-Les profondeurs 0 à 3 sont figées dans [tests/perft.rs](tests/perft.rs) ; les
-profondeurs 4 à 6 se lancent à la demande via le binaire `perft`.
+« Positions uniques » compte les positions distinctes (dédupliquées par
+hash Zobrist) atteignables en **exactement** N coups depuis la position
+initiale — à ne pas confondre avec le perft, qui compte les feuilles de
+l'arbre des coups et donc double-compte chaque transposition. Activé via
+le flag opt-in `cargo run --release --bin perft -- N --unique` (exact en
+HashSet jusqu'à depth 5 ; HyperLogLog à 16384 registres au-delà, erreur
+attendue ~0,8 %). Le décompte exact à depth 6 demanderait ~80 Go de RAM
+et reste non mesuré ici ; à depth 7 le walk HLL prend ~3 h.
+
+Les profondeurs 0 à 3 sont figées dans [tests/perft.rs](tests/perft.rs)
+côté perft, et 0 à 4 côté positions uniques. Les profondeurs 4 à 7 se
+lancent à la demande via le binaire `perft`.
 
 ## Structure
 
