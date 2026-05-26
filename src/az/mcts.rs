@@ -62,11 +62,18 @@ pub struct PuctConfig {
     pub iterations: u32,
     /// Exploration constant. AZ paper used ~1.0–4.0; start at 1.5.
     pub c_puct: f32,
+    /// First Play Urgency reduction (Lc0). Initial Q for an unvisited
+    /// child is `-Q_parent - fpu_reduction` (signs flipped because Q's
+    /// stored at a node are from "the mover-into" perspective, which is
+    /// the parent's opposite at its own level). Discourages exploring
+    /// every untried sibling before deepening the high-Q ones. AZ paper
+    /// effectively uses 0 (no FPU); Lc0 defaults to ~0.2.
+    pub fpu_reduction: f32,
 }
 
 impl Default for PuctConfig {
     fn default() -> Self {
-        Self { iterations: 400, c_puct: 1.5 }
+        Self { iterations: 400, c_puct: 1.5, fpu_reduction: 0.2 }
     }
 }
 
@@ -111,13 +118,29 @@ pub(crate) fn puct_root_node(board: &Board) -> PuctNode {
 }
 
 #[inline]
-fn puct_score(child: &PuctNode, parent_visits: u32, c_puct: f32) -> f32 {
+fn puct_score(
+    child: &PuctNode,
+    parent: &PuctNode,
+    c_puct: f32,
+    fpu_reduction: f32,
+) -> f32 {
     let q = if child.visits == 0 {
-        0.0
+        // FPU: estimate Q from parent's mean. `parent.value_sum` is
+        // signed for "mover-into-parent" (= grandparent's STM); flip
+        // to express from parent's STM perspective, which is the view
+        // in which `child.value_sum` lives. Defensive on visits=0
+        // (root before first iter — never actually reached because
+        // PUCT selection only runs on expanded internal nodes).
+        let parent_q = if parent.visits == 0 {
+            0.0
+        } else {
+            -(parent.value_sum / parent.visits as f64) as f32
+        };
+        parent_q - fpu_reduction
     } else {
         (child.value_sum / child.visits as f64) as f32
     };
-    let u = c_puct * child.prior * (parent_visits as f32).sqrt() / (1.0 + child.visits as f32);
+    let u = c_puct * child.prior * (parent.visits as f32).sqrt() / (1.0 + child.visits as f32);
     q + u
 }
 
@@ -132,6 +155,7 @@ pub(crate) fn puct_select(
     arena: &Vec<PuctNode>,
     root_board: &Board,
     c_puct: f32,
+    fpu_reduction: f32,
 ) -> (Board, usize) {
     let mut board = root_board.clone();
     let mut node_id = 0usize;
@@ -140,14 +164,13 @@ pub(crate) fn puct_select(
         if !node.expanded || node.is_terminal {
             break;
         }
-        let parent_visits = node.visits;
         let best = node
             .children
             .iter()
             .copied()
             .max_by(|&a, &b| {
-                let sa = puct_score(&arena[a], parent_visits, c_puct);
-                let sb = puct_score(&arena[b], parent_visits, c_puct);
+                let sa = puct_score(&arena[a], node, c_puct, fpu_reduction);
+                let sb = puct_score(&arena[b], node, c_puct, fpu_reduction);
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .expect("expanded internal node has children");
@@ -299,8 +322,9 @@ pub(crate) fn puct_iterate<E: Evaluator + ?Sized>(
     root_board: &Board,
     eval: &E,
     c_puct: f32,
+    fpu_reduction: f32,
 ) {
-    let (leaf_board, leaf_id) = puct_select(arena, root_board, c_puct);
+    let (leaf_board, leaf_id) = puct_select(arena, root_board, c_puct, fpu_reduction);
     let leaf_value: f64 = if arena[leaf_id].is_terminal {
         puct_terminal_value(&arena[leaf_id])
     } else {
@@ -349,7 +373,13 @@ impl<E: Evaluator> Player for PuctPlayer<E> {
         arena.push(puct_root_node(board));
 
         for _ in 0..self.config.iterations {
-            puct_iterate(&mut arena, board, &self.eval, self.config.c_puct);
+            puct_iterate(
+                &mut arena,
+                board,
+                &self.eval,
+                self.config.c_puct,
+                self.config.fpu_reduction,
+            );
         }
         self.last_iterations = self.config.iterations;
         self.last_elapsed_ms = start.elapsed().as_millis() as u64;
@@ -407,7 +437,7 @@ mod tests {
         // exercising selection + expansion + backup at each move.
         let mut puct = PuctPlayer::new(
             UniformEval,
-            PuctConfig { iterations: 50, c_puct: 1.5 },
+            PuctConfig { iterations: 50, c_puct: 1.5, fpu_reduction: 0.2 },
             17,
         );
         let mut rng = RandomPlayer::new(17);

@@ -132,7 +132,13 @@ fn search_one_move<E: Evaluator + ?Sized>(
     let mut arena: Vec<PuctNode> = Vec::with_capacity(config.puct.iterations as usize + 8);
     arena.push(puct_root_node(board));
     for _ in 0..config.puct.iterations {
-        puct_iterate(&mut arena, board, eval, config.puct.c_puct);
+        puct_iterate(
+            &mut arena,
+            board,
+            eval,
+            config.puct.c_puct,
+            config.puct.fpu_reduction,
+        );
     }
 
     let root = &arena[0];
@@ -275,7 +281,12 @@ pub fn play_batched<E: BatchedEvaluator + ?Sized>(
             if w.board.outcome().is_some() {
                 continue; // game finished, awaiting reset
             }
-            let (leaf_board, leaf_id) = puct_select(&w.arena, &w.board, config.puct.c_puct);
+            let (leaf_board, leaf_id) = puct_select(
+                &w.arena,
+                &w.board,
+                config.puct.c_puct,
+                config.puct.fpu_reduction,
+            );
             if w.arena[leaf_id].is_terminal {
                 let v = puct_terminal_value(&w.arena[leaf_id]);
                 to_backup_terminal.push((i, leaf_id, v));
@@ -441,7 +452,7 @@ mod tests {
     #[test]
     fn batched_selfplay_collects_target_games_with_well_shaped_samples() {
         let cfg = SelfPlayConfig {
-            puct: PuctConfig { iterations: 20, c_puct: 1.5 },
+            puct: PuctConfig { iterations: 20, c_puct: 1.5, fpu_reduction: 0.2 },
             temperature_plies: 4,
             max_plies: 80,
         };
@@ -468,7 +479,7 @@ mod tests {
     #[test]
     fn selfplay_produces_well_shaped_samples() {
         let cfg = SelfPlayConfig {
-            puct: PuctConfig { iterations: 30, c_puct: 1.5 },
+            puct: PuctConfig { iterations: 30, c_puct: 1.5, fpu_reduction: 0.2 },
             temperature_plies: 4,
             max_plies: 60, // keep the test fast
         };

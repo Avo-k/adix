@@ -190,7 +190,11 @@ fn main() {
         // --- self-play phase --------------------------------------------
         let sp_start = Instant::now();
         let cfg = SelfPlayConfig {
-            puct: PuctConfig { iterations: args.puct_iters, c_puct: 1.5 },
+            puct: PuctConfig {
+                iterations: args.puct_iters,
+                c_puct: 1.5,
+                fpu_reduction: 0.2,
+            },
             temperature_plies: 20,
             max_plies: 400,
         };
