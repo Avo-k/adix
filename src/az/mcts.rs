@@ -72,6 +72,7 @@ impl Default for PuctConfig {
 
 // --- arena ----------------------------------------------------------------
 
+#[derive(Clone)]
 pub(crate) struct PuctNode {
     pub(crate) visits: u32,
     /// Sum of values from the perspective of the player who *moved
@@ -209,6 +210,76 @@ pub(crate) fn puct_backup(arena: &mut Vec<PuctNode>, leaf_id: usize, leaf_value:
     }
 }
 
+/// Transplant the subtree rooted at `chosen_child_id` to become the
+/// new arena, discarding all other branches. Used by self-play to
+/// **reuse the search tree across moves** (Lc0-style): after picking
+/// a move at the old root, the chosen child's subtree already has
+/// useful priors / visits / Q-values that would otherwise be thrown
+/// away. Net effect is fewer evaluations per ply for the same
+/// effective search depth.
+///
+/// Returns a fresh arena where the chosen child is at index 0. Visits
+/// and value sums on the surviving nodes are preserved — they remain
+/// from the perspective of "the player who moved into them", which is
+/// unchanged by re-rooting (still the new-root's STM for its children).
+/// The new root's `prior` and `mv` are reset to the root-sentinel
+/// values (1.0 / None); its `value_sum` is reset to 0 since the root
+/// never accumulates `value_sum` in [`puct_backup`] anyway.
+pub(crate) fn promote_child_to_root(
+    arena: Vec<PuctNode>,
+    chosen_child_id: usize,
+) -> Vec<PuctNode> {
+    let n_old = arena.len();
+    // BFS to collect old node ids in the chosen subtree, in level order.
+    let mut old_to_new: Vec<Option<usize>> = vec![None; n_old];
+    let mut new_to_old: Vec<usize> = Vec::new();
+    old_to_new[chosen_child_id] = Some(0);
+    new_to_old.push(chosen_child_id);
+    let mut head = 0usize;
+    while head < new_to_old.len() {
+        let old_id = new_to_old[head];
+        head += 1;
+        for &child_old in &arena[old_id].children {
+            if old_to_new[child_old].is_none() {
+                let new_id = new_to_old.len();
+                old_to_new[child_old] = Some(new_id);
+                new_to_old.push(child_old);
+            }
+        }
+    }
+
+    let mut new_arena: Vec<PuctNode> = Vec::with_capacity(new_to_old.len());
+    for (new_id, &old_id) in new_to_old.iter().enumerate() {
+        let old = &arena[old_id];
+        let new_parent = if new_id == 0 {
+            None
+        } else {
+            // SAFETY: every node in the surviving subtree has a parent
+            // that's also in the surviving subtree (we BFS'd through
+            // the children pointers).
+            Some(old_to_new[old.parent.expect("non-root has parent")].expect("parent reindexed"))
+        };
+        let new_children: Vec<usize> = old
+            .children
+            .iter()
+            .map(|c| old_to_new[*c].expect("child reindexed"))
+            .collect();
+        new_arena.push(PuctNode {
+            visits: old.visits,
+            value_sum: if new_id == 0 { 0.0 } else { old.value_sum },
+            prior: if new_id == 0 { 1.0 } else { old.prior },
+            mv: if new_id == 0 { None } else { old.mv },
+            parent: new_parent,
+            children: new_children,
+            stm: old.stm,
+            is_terminal: old.is_terminal,
+            terminal_outcome: old.terminal_outcome,
+            expanded: old.expanded,
+        });
+    }
+    new_arena
+}
+
 /// Score of a terminal node from its own STM perspective. Used to feed
 /// backup when selection landed on an end-of-game state.
 #[inline]
@@ -342,5 +413,65 @@ mod tests {
         let mut rng = RandomPlayer::new(17);
         let rec = crate::agent::play_game(&mut puct, &mut rng);
         let _ = rec.outcome;
+    }
+
+    #[test]
+    fn promote_child_to_root_keeps_subtree_consistent() {
+        // Build a small synthetic arena by hand:
+        //
+        //         0 (root)
+        //        /  |  \
+        //       1   2   3
+        //      / \   \
+        //     4   5   6
+        //
+        // Then re-root at node 2. Expected new arena:
+        //   - 2 nodes: old #2 (new 0) and old #6 (new 1)
+        //   - new 0 has parent=None, children=[1]
+        //   - new 1 has parent=Some(0), no children
+        //   - visits / value_sum preserved on new 1
+        //   - new 0 has prior=1.0, mv=None, value_sum=0.0 (root-sentinel)
+        let board = Board::initial();
+        let mk = |visits: u32, value_sum: f64, prior: f32, parent: Option<usize>| PuctNode {
+            visits,
+            value_sum,
+            prior,
+            mv: None,
+            parent,
+            children: Vec::new(),
+            stm: board.side_to_move,
+            is_terminal: false,
+            terminal_outcome: None,
+            expanded: true,
+        };
+        let mut arena: Vec<PuctNode> = (0..7).map(|i| {
+            let parent = match i {
+                0 => None,
+                1 | 2 | 3 => Some(0),
+                4 | 5 => Some(1),
+                6 => Some(2),
+                _ => unreachable!(),
+            };
+            mk(10 + i as u32, (i as f64) * 0.5, 0.1 * (i as f32 + 1.0), parent)
+        }).collect();
+        arena[0].children = vec![1, 2, 3];
+        arena[1].children = vec![4, 5];
+        arena[2].children = vec![6];
+
+        let new_arena = promote_child_to_root(arena.clone(), 2);
+        assert_eq!(new_arena.len(), 2, "subtree of node 2 has 2 nodes (itself + child 6)");
+        // new root: was node 2
+        assert_eq!(new_arena[0].parent, None);
+        assert_eq!(new_arena[0].children, vec![1]);
+        assert!(new_arena[0].mv.is_none());
+        assert_eq!(new_arena[0].prior, 1.0);
+        assert_eq!(new_arena[0].value_sum, 0.0);
+        assert_eq!(new_arena[0].visits, arena[2].visits); // visits carried
+        // child: was node 6
+        assert_eq!(new_arena[1].parent, Some(0));
+        assert!(new_arena[1].children.is_empty());
+        assert_eq!(new_arena[1].visits, arena[6].visits);
+        assert_eq!(new_arena[1].value_sum, arena[6].value_sum);
+        assert_eq!(new_arena[1].prior, arena[6].prior);
     }
 }

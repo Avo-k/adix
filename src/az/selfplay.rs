@@ -31,8 +31,8 @@ use crate::piece::Color;
 
 use super::encoding::{ACTIONS, INPUT_SIZE, encode_state, move_to_index};
 use super::mcts::{
-    BatchedEvaluator, Evaluator, PuctConfig, PuctNode, puct_expand, puct_iterate,
-    puct_backup, puct_root_node, puct_select, puct_terminal_value,
+    BatchedEvaluator, Evaluator, PuctConfig, PuctNode, promote_child_to_root, puct_expand,
+    puct_iterate, puct_backup, puct_root_node, puct_select, puct_terminal_value,
 };
 
 /// One AlphaZero training sample. All vectors have the canonical sizes
@@ -347,11 +347,27 @@ pub fn play_batched<E: BatchedEvaluator + ?Sized>(
 
             // Pick the actual move with the configured temperature schedule.
             let mv = pick_move_with_temperature(&visits, config, &workers[i].board, rng);
+            // Tree reuse: find the arena id of the child that corresponds
+            // to the picked move, then promote its subtree to be the new
+            // root. Salvages prior visits / Q-values / cached
+            // expansions instead of rebuilding from scratch.
+            let chosen_child_id = workers[i].arena[0]
+                .children
+                .iter()
+                .copied()
+                .find(|&cid| workers[i].arena[cid].mv == Some(mv))
+                .expect("picked move must match a root child");
             workers[i].board.apply_legal(mv);
             workers[i].ply = workers[i].board.ply;
-
-            // Reset arena for the next search.
-            workers[i].reset_arena();
+            let old_arena = std::mem::take(&mut workers[i].arena);
+            workers[i].arena = promote_child_to_root(old_arena, chosen_child_id);
+            // Lc0-style budgeting: count the carried-over visits toward
+            // the new move's iteration budget. The transplanted subtree
+            // already represents that much search work; we only owe the
+            // delta. Cap defensively if reuse somehow exceeds the
+            // budget (shouldn't happen unless config changed mid-game).
+            let carried = workers[i].arena[0].visits;
+            workers[i].iter_count = carried.min(config.puct.iterations);
         }
 
         // 5. Game-over workers: emit samples, restart the board.
