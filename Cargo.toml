@@ -1,0 +1,20 @@
+[package]
+name = "adix"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "adix"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adix"
+path = "src/bin/adix.rs"
+
+[[bin]]
+name = "perft"
+path = "src/bin/perft.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
